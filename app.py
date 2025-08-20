@@ -635,29 +635,71 @@ from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+import pickle
+import os
 
 st.title('Movie Recommendation System🎬')
 
-# Load and process data directly from CSV
+# Load and process data with pickle fallback
 @st.cache_data
 def load_and_process_data():
     """Load movies data and create similarity matrix"""
     try:
+        # First try to load from pickle files if they exist
+        if os.path.exists('movies.pkl') and os.path.exists('similarity.pkl'):
+            movies = pickle.load(open('movies.pkl', 'rb'))
+            similarity = pickle.load(open('similarity.pkl', 'rb'))
+            return movies, similarity
+        
+        # If pickle files don't exist, process from CSV
+        st.info("Processing movie data for the first time... This may take a few minutes.")
+        
         # Load the movies CSV file
         movies = pd.read_csv('movies.csv')
         
-        # Basic preprocessing - you might need to adjust this based on your CSV structure
-        # Assuming your CSV has columns like 'title', 'genres', 'overview', etc.
+        # Try to load credits if it exists
+        credits_exists = os.path.exists('credits.csv')
+        if credits_exists:
+            try:
+                credits = pd.read_csv('credits.csv')
+                # Merge if both have 'title' column
+                if 'title' in credits.columns:
+                    movies = movies.merge(credits, on='title', how='left')
+            except Exception as e:
+                st.warning(f"Could not merge credits data: {e}")
         
-        # If you have a 'tags' or 'features' column, use that
+        # Basic preprocessing - flexible column detection
+        feature_columns = []
+        
+        # Check for common columns and combine them
+        if 'overview' in movies.columns:
+            feature_columns.append('overview')
+        if 'genres' in movies.columns:
+            feature_columns.append('genres')
+        if 'keywords' in movies.columns:
+            feature_columns.append('keywords')
+        if 'cast' in movies.columns:
+            feature_columns.append('cast')
+        if 'crew' in movies.columns:
+            feature_columns.append('crew')
         if 'tags' in movies.columns:
-            features = movies['tags'].fillna('')
-        elif 'overview' in movies.columns:
-            features = movies['overview'].fillna('')
-        elif 'genres' in movies.columns:
-            features = movies['genres'].fillna('')
+            feature_columns.append('tags')
+        
+        # If we have feature columns, combine them
+        if feature_columns:
+            # Fill NaN values and combine columns
+            combined_features = ""
+            for col in feature_columns:
+                movies[col] = movies[col].fillna('')
+                if combined_features == "":
+                    combined_features = movies[col].astype(str)
+                else:
+                    combined_features = combined_features + " " + movies[col].astype(str)
+            
+            features = combined_features
         else:
-            # Fallback: use title
+            # Fallback: use title if no other features available
+            st.warning("No feature columns found. Using titles for recommendations.")
             features = movies['title'].fillna('')
         
         # Create similarity matrix
@@ -665,9 +707,18 @@ def load_and_process_data():
         vectors = cv.fit_transform(features).toarray()
         similarity = cosine_similarity(vectors)
         
+        # Save processed data as pickle for faster future loads
+        try:
+            pickle.dump(movies, open('movies.pkl', 'wb'))
+            pickle.dump(similarity, open('similarity.pkl', 'wb'))
+            st.success("Movie data processed and saved successfully!")
+        except Exception as e:
+            st.warning(f"Could not save processed data: {e}")
+        
         return movies, similarity
     except Exception as e:
         st.error(f"Error loading data: {e}")
+        st.error("Please make sure 'movies.csv' exists in your repository with at least a 'title' column.")
         return None, None
 
 # Load data
@@ -741,7 +792,12 @@ def recommend(movie):
     Recommend movies based on similarity and fetch their posters - SUPER FAST VERSION
     """
     # Find the index of the selected movie
-    movie_idx = movies[movies['title'] == movie].index[0]
+    movie_matches = movies[movies['title'] == movie]
+    if movie_matches.empty:
+        st.error(f"Movie '{movie}' not found in the database.")
+        return [], [], []
+    
+    movie_idx = movie_matches.index[0]
     distances = similarity[movie_idx]
     
     # Get top 10 similar movies (excluding the selected movie itself)
@@ -751,7 +807,7 @@ def recommend(movie):
     recommend_movies = []
     for i in movies_list:
         movie_index = i[0]
-        movie_title = movies.iloc[movie_index].title
+        movie_title = movies.iloc[movie_index]['title']
         recommend_movies.append(movie_title)
     
     # Use ThreadPoolExecutor for parallel API calls - MUCH FASTER!
@@ -773,47 +829,67 @@ def recommend(movie):
     return recommend_movies, recommend_posters, recommend_imdb_urls
 
 # Streamlit UI
-movies_list = movies['title'].values
-selected_movie = st.selectbox(
-    "Choose a movie:",
-    movies_list
-)
+if 'title' in movies.columns:
+    movies_list = movies['title'].values
+    selected_movie = st.selectbox(
+        "Choose a movie:",
+        movies_list
+    )
 
-if st.button('Recommend'):
-    with st.spinner('Finding recommendations and fetching posters...'):
-        recommendations, posters, imdb_urls = recommend(selected_movie)
-    
-    st.success(f"Movies similar to '{selected_movie}':")
-    
-    # Display recommendations in a grid layout
-    cols = st.columns(3)  # 3 columns for better mobile responsiveness
-    
-    for idx, (movie, poster, imdb_url) in enumerate(zip(recommendations, posters, imdb_urls)):
-        with cols[idx % 3]:
-            try:
-                st.image(poster, width=200, caption=movie)
-            except:
-                # If image fails to load, show text only
-                st.write(f"🎬 **{movie}**")
-                st.write("_(Poster not available)_")
-    
-    # Alternative detailed view
-    st.write("---")
-    st.write("### 🎬 Recommended Movies:")
-    
-    for idx, (movie, poster, imdb_url) in enumerate(zip(recommendations, posters, imdb_urls), 1):
-        col1, col2 = st.columns([1, 2])
+    if st.button('Recommend'):
+        with st.spinner('Finding recommendations and fetching posters...'):
+            recommendations, posters, imdb_urls = recommend(selected_movie)
         
-        with col1:
-            try:
-                st.image(poster, width=150)
-            except:
-                st.write("🎭")  # Movie emoji as fallback
-        
-        with col2:
-            st.write(f"**{idx}. {movie}**")
-            if imdb_url:
-                st.markdown(f"[View on IMDb]({imdb_url})")
-            else:
-                st.write("IMDb link not available")
+        if recommendations:
+            st.success(f"Movies similar to '{selected_movie}':")
+            
+            # Display recommendations in a grid layout
+            cols = st.columns(3)  # 3 columns for better mobile responsiveness
+            
+            for idx, (movie, poster, imdb_url) in enumerate(zip(recommendations, posters, imdb_urls)):
+                with cols[idx % 3]:
+                    try:
+                        st.image(poster, width=200, caption=movie)
+                    except:
+                        # If image fails to load, show text only
+                        st.write(f"🎬 **{movie}**")
+                        st.write("_(Poster not available)_")
+            
+            # Alternative detailed view
             st.write("---")
+            st.write("### 🎬 Recommended Movies:")
+            
+            for idx, (movie, poster, imdb_url) in enumerate(zip(recommendations, posters, imdb_urls), 1):
+                col1, col2 = st.columns([1, 2])
+                
+                with col1:
+                    try:
+                        st.image(poster, width=150)
+                    except:
+                        st.write("🎭")  # Movie emoji as fallback
+                
+                with col2:
+                    st.write(f"**{idx}. {movie}**")
+                    if imdb_url:
+                        st.markdown(f"[View on IMDb]({imdb_url})")
+                    else:
+                        st.write("IMDb link not available")
+                    st.write("---")
+        else:
+            st.error("Could not generate recommendations. Please try a different movie.")
+else:
+    st.error("Movies dataset doesn't contain a 'title' column. Please check your CSV file structure.")
+
+# Add some info about the app
+st.sidebar.markdown("""
+## About
+This Movie Recommendation System uses machine learning to suggest similar movies based on:
+- Movie genres
+- Plot overview
+- Cast and crew
+- Keywords
+
+The system processes your movie data automatically and creates recommendations using cosine similarity.
+
+**Note:** On first run, the app may take a few minutes to process the movie data.
+""")

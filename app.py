@@ -33,16 +33,32 @@
 # #      st.write(i)
 
 import streamlit as st
-import pickle
 import pandas as pd
 import requests
 from urllib.parse import quote
 import concurrent.futures
 from threading import Lock
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
 
-# Load data
-movies = pickle.load(open('movies.pkl','rb'))
-similarity = pickle.load(open('similarity.pkl','rb'))
+# Cache data loading and similarity matrix creation
+@st.cache_data
+def load_data_and_create_similarity():
+    """Load data and create similarity matrix on startup"""
+    # Load movies data from CSV
+    movies = pd.read_csv('movies.csv')
+    
+    # Create similarity matrix on the fly
+    cv = CountVectorizer(max_features=5000, stop_words='english')
+    vectors = cv.fit_transform(movies['tags']).toarray()
+    similarity = cosine_similarity(vectors)
+    
+    return movies, similarity
+
+# Load data once when app starts
+with st.spinner('Loading movie data...'):
+    movies, similarity = load_data_and_create_similarity()
 
 st.title('CineSuggest')
 
@@ -183,7 +199,6 @@ if st.button('Recommend'):
                 fallback_url = f"https://www.imdb.com/find?q={search_title}&ref_=nv_sr_sm"
                 st.markdown(f"[Search on IMDb]({fallback_url})")
             st.write("---")
-
 
 
 

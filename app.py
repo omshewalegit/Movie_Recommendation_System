@@ -1,49 +1,36 @@
-# # import streamlit as st
-# # import pickle
-# # import pandas as pd
-
-# # movies = pickle.load(open('movies.pkl','rb'))
-# # st.title('Movie Recommender System 🎬')
-# # similarity = pickle.load(open('similarity.pkl','rb'))
-
-# # def recommend(movie):
-# #     recommend_movies = []
-# #     movie_idx = movies[movies['title']==movie].index[0]
-# #     distances = similarity[movie_idx]
-# #     movies_list = sorted(list(enumerate(distances)),reverse=True,key=lambda x:x[1])[1:11]
-
-# #     for i in movies_list:
-# #      movie_id = i[0]
-# #     #Fetching the poster of the movie form API
-
-
-# #      recommend_movies.append(movies.iloc[i[0]].title)
-# #     return recommend_movies     
-
-
-# # movies_list = movies['title'].values
-# # selected_movie = st.selectbox(
-# #     "Choose a movie",
-# #      movies_list
-# # )
-
-# # if st.button('Recommend'):
-# #     recommendations = recommend(selected_movie)
-# #     for i in recommendations:
-# #      st.write(i)
 import streamlit as st
 import pickle
 import pandas as pd
 import requests
 from urllib.parse import quote
-import concurrent.futures
-from threading import Lock
+import time
+import os
 
-# Load data (ORIGINAL WAY - for full accuracy)
-movies = pickle.load(open('movies.pkl','rb'))
-similarity = pickle.load(open('similarity.pkl','rb'))
+# Configure Streamlit page
+st.set_page_config(
+    page_title="CineSuggest",
+    page_icon="🎬",
+    layout="wide"
+)
 
-st.title('CineSuggest')
+# Load data with error handling
+@st.cache_data
+def load_data():
+    try:
+        movies = pickle.load(open('movies.pkl', 'rb'))
+        similarity = pickle.load(open('similarity.pkl', 'rb'))
+        return movies, similarity
+    except Exception as e:
+        st.error(f"Error loading data files: {str(e)}")
+        return None, None
+
+movies, similarity = load_data()
+
+if movies is None or similarity is None:
+    st.stop()
+
+st.title('🎬 CineSuggest')
+st.markdown("Discover movies you'll love more based on your favorites")
 
 def fix_movie_title(title):
     """Fix movie title capitalization"""
@@ -66,124 +53,134 @@ def fix_movie_title(title):
     
     return ' '.join(fixed_words)
 
-def fetch_movie_data_omdb(movie_title):
-    """Fetch movie data from OMDb API"""
-    try:
-        api_key = "81293116"
-        clean_title = quote(movie_title.strip())
-        url = f"http://www.omdbapi.com/?apikey={api_key}&t={clean_title}&plot=short&r=json"
-        
-        response = requests.get(url, timeout=2)
-        data = response.json()
-        
-        if response.status_code == 200 and data.get('Response') == 'True':
-            poster_url = data.get('Poster')
-            imdb_id = data.get('imdbID')
-            
-            return {
-                'poster': poster_url if poster_url != 'N/A' else None,
-                'imdb_id': imdb_id,
-                'imdb_url': f"https://www.imdb.com/title/{imdb_id}/" if imdb_id else None
+def get_movie_poster_omdb(movie_title, retries=2):
+    """Fetch movie poster from OMDb API with retries"""
+    api_key = "10f3c387"  # Updated API key
+    
+    for attempt in range(retries + 1):
+        try:
+            clean_title = movie_title.strip()
+            encoded_title = quote(clean_title)
+            url = f"https://www.omdbapi.com/?apikey={api_key}&t={encoded_title}"
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
             }
-        
-        return {'poster': None, 'imdb_id': None, 'imdb_url': None}
-    except:
-        return {'poster': None, 'imdb_id': None, 'imdb_url': None}
+            response = requests.get(url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('Response') == 'True':
+                    poster_url = data.get('Poster')
+                    imdb_id = data.get('imdbID')
+                    year = data.get('Year')
+                    director = data.get('Director')
+                    genre = data.get('Genre')
+                    plot = data.get('Plot')
+                    if poster_url and poster_url != 'N/A' and poster_url.startswith('http'):
+                        return {
+                            'poster': poster_url,
+                            'imdb_id': imdb_id,
+                            'imdb_url': f"https://www.imdb.com/title/{imdb_id}/" if imdb_id else None,
+                            'year': year,
+                            'director': director,
+                            'genre': genre,
+                            'plot': plot,
+                            'success': True
+                        }
+            if attempt == retries:
+                return {'success': False, 'error': f"OMDb Error: {data.get('Error', 'Unknown error')}"}
+        except Exception as e:
+            if attempt == retries:
+                return {'success': False, 'error': str(e)}
+        time.sleep(1)
+    return {'success': False, 'error': "Max retries exceeded"}
 
 def get_fallback_poster(movie_title):
-    """Generate fallback poster"""
-    encoded_title = quote(movie_title)
-    return f"https://via.placeholder.com/500x750/1a1a1a/ffffff?text={encoded_title}"
+    title_short = movie_title[:25] + "..." if len(movie_title) > 25 else movie_title
+    encoded_title = quote(title_short)
+    return f"https://via.placeholder.com/300x450/34495e/ecf0f1?text={encoded_title}"
 
-@st.cache_data
-def fetch_poster_combined(movie_title):
-    """Get movie data with fallback"""
-    movie_data = fetch_movie_data_omdb(movie_title)
-    if movie_data['poster']:
-        return movie_data
-    
-    return {
-        'poster': get_fallback_poster(movie_title),
-        'imdb_id': None,
-        'imdb_url': None
-    }
+@st.cache_data(ttl=3600)
+def get_movie_data(movie_title):
+    result = get_movie_poster_omdb(movie_title)
+    if result.get('success'):
+        return result
+    else:
+        return {
+            'poster': get_fallback_poster(movie_title),
+            'imdb_url': f"https://www.imdb.com/find?q={quote(movie_title)}",
+            'success': False,
+            'error': result.get('error', 'Unknown error')
+        }
 
 def recommend(movie):
-    """Recommend movies and fetch data"""
-    movie_idx = movies[movies['title'] == movie].index[0]
-    distances = similarity[movie_idx]
-    
-    movies_list = sorted(list(enumerate(distances)), reverse=True, key=lambda x: x[1])[1:11]
-    
-    recommend_movies = []
-    for i in movies_list:
-        movie_index = i[0]
-        movie_title = movies.iloc[movie_index].title
-        recommend_movies.append(movie_title)
-    
-    recommend_posters = []
-    recommend_imdb_urls = []
-    
-    def fetch_single_movie_data(movie_title):
-        return fetch_poster_combined(movie_title)
-    
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        movie_data_list = list(executor.map(fetch_single_movie_data, recommend_movies))
-    
-    for movie_data in movie_data_list:
-        recommend_posters.append(movie_data['poster'])
-        recommend_imdb_urls.append(movie_data['imdb_url'])
-    
-    return recommend_movies, recommend_posters, recommend_imdb_urls
+    try:
+        movie_indices = movies[movies['title'] == movie].index
+        if len(movie_indices) == 0:
+            return [], "Movie not found in database"
+        movie_idx = movie_indices[0]
+        distances = similarity[movie_idx]
+        movies_list = sorted(list(enumerate(distances)), reverse=True, key=lambda x: x[1])[1:11]
+        recommended_movies = [movies.iloc[i[0]].title for i in movies_list]
+        return recommended_movies, None
+    except Exception as e:
+        return [], f"Error generating recommendations: {str(e)}"
 
-# UI
-movies_list = movies['title'].values
-selected_movie = st.selectbox("Choose a movie:", movies_list)
+# Set default number of recommendations
+max_recommendations = 10
 
-if st.button('Recommend'):
-    with st.spinner('Finding recommendations...'):
-        recommendations, posters, imdb_urls = recommend(selected_movie)
+# Main interface
+col1, col2 = st.columns([3, 1])
+
+with col1:
+    movies_list = movies['title'].values
+    selected_movie = st.selectbox("Choose a movie to get recommendations:", movies_list, index=0)
+
+with col2:
+    st.write("")
+    st.write("")
+    recommend_button = st.button('🎬 Get Recommendations', type="primary")
+
+if recommend_button and selected_movie:
+    with st.spinner('🔍 Finding similar movies...'):
+        recommendations, error = recommend(selected_movie)
     
-    st.success(f"Movies similar to '{selected_movie}':")
-    
-    # Grid layout
-    cols = st.columns(3)
-    
-    for idx, (movie, poster, imdb_url) in enumerate(zip(recommendations, posters, imdb_urls)):
-        with cols[idx % 3]:
-            try:
-                st.image(poster, width=200)
-                st.markdown(f"**{fix_movie_title(movie)}**")
-            except:
-                st.markdown(f"**{fix_movie_title(movie)}**")
-                st.write("_(Poster not available)_")
-    
-    # Detailed view
-    st.write("---")
-    st.write("### More About Recommended Movies:")
-    
-    for idx, (movie, poster, imdb_url) in enumerate(zip(recommendations, posters, imdb_urls), 1):
-        col1, col2 = st.columns([1, 2])
+    if error:
+        st.error(f"Error: {error}")
+    elif recommendations:
+        recommendations = recommendations[:max_recommendations]
+        tab1, tab2 = st.tabs(["🖼 Poster View", "📝 Details View"])
         
-        with col1:
-            try:
-                st.image(poster, width=150)
-            except:
-                st.write("🎭")
+        with tab1:
+            cols = st.columns(3)
+            for idx, movie in enumerate(recommendations):
+                with cols[idx % 3]:
+                    movie_data = get_movie_data(movie)
+                    try:
+                        st.image(movie_data['poster'], width=200, caption=fix_movie_title(movie))
+                    except:
+                        st.markdown("🎭 No Poster")
         
-        with col2:
-            display_title = fix_movie_title(movie)
-            st.write(f"**{idx}. {display_title}**")
-            
-            if imdb_url:
-                st.markdown(f"[View on IMDb]({imdb_url})")
-            else:
-                search_title = display_title.replace(' ', '+')
-                fallback_url = f"https://www.imdb.com/find?q={search_title}&ref_=nv_sr_sm"
-                st.markdown(f"[Search on IMDb]({fallback_url})")
-            st.write("---")
-
-
-
-
-
+        with tab2:
+            for idx, movie in enumerate(recommendations, 1):
+                movie_data = get_movie_data(movie)
+                col1, col2 = st.columns([1, 3])
+                with col1:
+                    try:
+                        st.image(movie_data['poster'], width=250)  # Increased poster size
+                    except:
+                        st.markdown("🎭 No Poster")
+                with col2:
+                    st.markdown(f"### {idx}. {fix_movie_title(movie)}")
+                    if movie_data.get('year'):
+                        st.write(f"*Year:* {movie_data['year']}")
+                    if movie_data.get('director') and movie_data['director'] != 'N/A':
+                        st.write(f"*Director:* {movie_data['director']}")
+                    if movie_data.get('genre') and movie_data['genre'] != 'N/A':
+                        st.write(f"*Genre:* {movie_data['genre']}")
+                    if movie_data.get('plot') and movie_data['plot'] != 'N/A':
+                        st.write(f"*Plot:* {movie_data['plot'][:200]}...")
+                    if movie_data.get('imdb_url'):
+                        st.markdown(f"[🎬 View on IMDb]({movie_data['imdb_url']})")
+                st.divider()
+    else:
+        st.warning("No recommendations found. Please try a different movie.")
